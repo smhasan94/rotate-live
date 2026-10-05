@@ -1,0 +1,22 @@
+name: fingerprint
+run-name: fingerprint ${{ inputs.nonce }}
+on:
+  workflow_dispatch:
+    inputs:
+      nonce:
+        description: "Set by the live test"
+        required: true
+        type: string
+      secret_name:
+        description: "Repository secret to fingerprint"
+        required: true
+        type: string
+permissions: {}
+jobs:
+  fingerprint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          VALUE: ${{ secrets[inputs.secret_name] }}
+        run: printf 'fingerprint=sha256:%s\n' "$(printf '%s' "$VALUE" | sha256sum | cut -c1-16)"
