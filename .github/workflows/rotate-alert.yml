@@ -1,0 +1,87 @@
+# Plan a secret-scanning alert with rotate, then apply it after an approval
+# in the rotate-apply environment. Based on docs/github-action.md in
+# smhasan94/rotate.
+#
+# Secrets:
+#   ROTATE_ALERTS_TOKEN  repository secret: fine-grained token, this repo
+#                        only, "Secret scanning alerts: read".
+#   ROTATE_GITHUB_TOKEN  optional. Repository secret with "Secrets: read" for
+#                        the plan; rotate-apply environment secret with
+#                        "Secrets: read and write" for the apply. Without it
+#                        the plan lists the Actions-secret search as failed.
+#
+# AWS (SHA-317): uncomment the configure-aws-credentials steps once the
+# rotate-plan and rotate-apply roles exist.
+name: rotate-alert
+on:
+  workflow_dispatch:
+    inputs:
+      alert:
+        description: Secret-scanning alert number (empty for all open alerts)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # for the AWS role
+    outputs:
+      rotation-ids: ${{ steps.rotate.outputs.rotation-ids }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::<account>:role/rotate-plan
+      #     aws-region: us-east-1
+      - id: rotate
+        uses: smhasan94/rotate@5cbf9abe49a40865ea05a054337d5f20ef938e87 # v0.3.0
+        with:
+          alert-number: ${{ inputs.alert }}
+          alerts-token: ${{ secrets.ROTATE_ALERTS_TOKEN }}
+        env:
+          ROTATE_GITHUB_TOKEN: ${{ secrets.ROTATE_GITHUB_TOKEN }} # read-only
+      # The state file ties the rotation ids to the leaked secrets'
+      # fingerprints. No secret value.
+      - if: steps.rotate.outputs.rotation-ids != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rotate-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.rotate.outputs.state-dir }}
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.rotation-ids != ''
+    runs-on: ubuntu-latest
+    environment: rotate-apply # waits for smhasan94 to approve
+    timeout-minutes: 30 # longer than overlap; max-wait below it
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::<account>:role/rotate-apply
+      #     aws-region: us-east-1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rotate-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rotate-plan-state
+      - uses: smhasan94/rotate@5cbf9abe49a40865ea05a054337d5f20ef938e87 # v0.3.0
+        with:
+          mode: apply
+          alert-number: ${{ inputs.alert }}
+          alerts-token: ${{ secrets.ROTATE_ALERTS_TOKEN }}
+          confirm: ${{ needs.plan.outputs.rotation-ids }}
+          state-dir: ${{ runner.temp }}/rotate-plan-state
+          max-wait: 20m
+        env:
+          ROTATE_GITHUB_TOKEN: ${{ secrets.ROTATE_GITHUB_TOKEN }} # the environment's, read and write
